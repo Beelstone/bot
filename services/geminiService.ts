@@ -18,14 +18,21 @@ export class GeminiService {
   }
 
   private async ensureApiKey(): Promise<void> {
-    const hasKey = await aiStudio.hasSelectedApiKey();
-    if (!hasKey) {
-      await aiStudio.openSelectKey();
+    if (aiStudio && typeof aiStudio.hasSelectedApiKey === 'function') {
+      const hasKey = await aiStudio.hasSelectedApiKey();
+      if (!hasKey) {
+        await aiStudio.openSelectKey();
+      }
     }
   }
 
+  private getAI() {
+    return new GoogleGenAI({ apiKey: process.env.API_KEY });
+  }
+
   async sendTextMessage(prompt: string, modelId: string, attachment?: Attachment) {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    await this.ensureApiKey();
+    const ai = this.getAI();
     
     const parts: any[] = [{ text: prompt }];
     if (attachment) {
@@ -37,20 +44,26 @@ export class GeminiService {
       });
     }
 
-    const response = await ai.models.generateContent({
-      model: modelId,
-      contents: { parts },
-      config: {
-        systemInstruction: "You are a versatile AI assistant living inside a Telegram-like interface. You are powered by Google Gemini. Be concise and friendly.",
+    try {
+      const response = await ai.models.generateContent({
+        model: modelId,
+        contents: { parts },
+        config: {
+          systemInstruction: "You are a versatile AI assistant living inside a Telegram Mini App. You are powered by Google Gemini. Use Markdown for formatting. Be concise and friendly.",
+        }
+      });
+      return response.text;
+    } catch (error: any) {
+      if (error.message?.includes("Requested entity was not found") && aiStudio) {
+        await aiStudio.openSelectKey();
       }
-    });
-    
-    return response.text;
+      throw error;
+    }
   }
 
   async generateImage(prompt: string, modelId: string, aspectRatio: string = "1:1") {
     await this.ensureApiKey();
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = this.getAI();
     
     try {
       const response = await ai.models.generateContent({
@@ -71,44 +84,29 @@ export class GeminiService {
       }
       throw new Error("No image data received.");
     } catch (error: any) {
-      if (error.message?.includes("Requested entity was not found")) {
+      if (error.message?.includes("Requested entity was not found") && aiStudio) {
         await aiStudio.openSelectKey();
-        return this.generateImage(prompt, modelId, aspectRatio);
       }
       throw error;
     }
   }
 
-  async faceSwap(faceImage: Attachment, targetImage: Attachment, additionalInstructions: string = "") {
+  async faceSwap(faceImage: Attachment, targetImage: Attachment, instructions: string = "") {
     await this.ensureApiKey();
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = this.getAI();
 
     try {
       const response = await ai.models.generateContent({
-        model: MODELS.IMAGE[0].id, // Use Pro model for edits
+        model: 'gemini-3-pro-image-preview', // Best for editing
         contents: {
           parts: [
-            {
-              inlineData: {
-                data: faceImage.data,
-                mimeType: faceImage.mimeType
-              }
-            },
-            {
-              inlineData: {
-                data: targetImage.data,
-                mimeType: targetImage.mimeType
-              }
-            },
-            {
-              text: `Instructions: Take the face from the first image and perfectly swap it onto the person in the second image. ${additionalInstructions}. Ensure the lighting, texture, and pose match the second image seamlessly.`
-            }
+            { inlineData: { data: faceImage.data, mimeType: faceImage.mimeType } },
+            { inlineData: { data: targetImage.data, mimeType: targetImage.mimeType } },
+            { text: `Task: Take the face from the first image and place it onto the person in the second image. ${instructions}. Match lighting and style. Return the edited image.` }
           ]
         },
         config: {
-          imageConfig: {
-            aspectRatio: "1:1"
-          }
+          imageConfig: { aspectRatio: "1:1" }
         }
       });
 
@@ -117,66 +115,42 @@ export class GeminiService {
           return `data:image/png;base64,${part.inlineData.data}`;
         }
       }
-      throw new Error("Face swap failed to produce an image.");
+      throw new Error("Face swap failed.");
     } catch (error: any) {
-      if (error.message?.includes("Requested entity was not found")) {
+      if (error.message?.includes("Requested entity was not found") && aiStudio) {
         await aiStudio.openSelectKey();
-        return this.faceSwap(faceImage, targetImage, additionalInstructions);
       }
       throw error;
     }
   }
 
-  async generateVideo(prompt: string, startImage?: Attachment, aspectRatio: string = "16:9") {
+  async generateVideo(prompt: string, startImage?: Attachment) {
     await this.ensureApiKey();
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = this.getAI();
 
     try {
-      const config: any = {
-        numberOfVideos: 1,
-        resolution: '720p',
-        aspectRatio: aspectRatio as any
-      };
-
-      const payload: any = {
-        model: MODELS.VIDEO_FAST.id,
-        prompt: prompt || "A cinematic scene",
-        config
-      };
-
-      if (startImage) {
-        payload.image = {
+      let operation = await ai.models.generateVideos({
+        model: 'veo-3.1-fast-generate-preview',
+        prompt: prompt || "Cinematic shot",
+        image: startImage ? {
           imageBytes: startImage.data,
           mimeType: startImage.mimeType
-        };
-      }
-
-      let operation = await ai.models.generateVideos(payload);
+        } : undefined,
+        config: { numberOfVideos: 1, resolution: '720p', aspectRatio: '16:9' }
+      });
 
       while (!operation.done) {
         await new Promise(resolve => setTimeout(resolve, 10000));
         operation = await ai.operations.getVideosOperation({ operation: operation });
       }
 
-      if (operation.error) {
-        throw new Error(`Video generation failed: ${operation.error.message || 'Error occurred.'}`);
-      }
-
       const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-      if (!downloadLink) {
-        throw new Error("Video generation failed: No download link.");
-      }
-
       const response = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);
-      if (!response.ok) {
-        throw new Error(`Failed to download video: ${response.statusText}`);
-      }
       const blob = await response.blob();
       return URL.createObjectURL(blob);
     } catch (error: any) {
-      if (error.message?.includes("Requested entity was not found")) {
+      if (error.message?.includes("Requested entity was not found") && aiStudio) {
         await aiStudio.openSelectKey();
-        return this.generateVideo(prompt, startImage, aspectRatio);
       }
       throw error;
     }
