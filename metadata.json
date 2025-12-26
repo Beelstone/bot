@@ -1,0 +1,8 @@
+{
+  "name": "Gemini Telegram Pro",
+  "description": "A Telegram-inspired AI suite featuring Chat, Nano Banana Pro (Image Generation), and Veo 3 (Video Generation).",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
